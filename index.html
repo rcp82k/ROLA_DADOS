@@ -25,10 +25,10 @@
   button[disabled] { opacity:.6; cursor:not-allowed; }
 
   .dice-wrap { margin:16px 0 10px; }
-  .dice-area { display:flex; gap:12px; flex-wrap:wrap; min-height:90px; perspective:700px; }
+  .dice-area { display:flex; gap:12px; flex-wrap:wrap; min-height:94px; perspective:900px; }
   .die { width:76px; height:76px; display:grid; place-items:center; border-radius:14px;
          background:#0f172a; border:1px solid #233047; font-size:1.7rem; font-weight:800;
-         transform-style:preserve-3d; box-shadow:inset 0 0 0 1px #152238, 0 6px 16px #0006; will-change:transform;
+         transform-style:preserve-3d; box-shadow:inset 0 0 0 1px #152238, 0 10px 20px #0008; will-change:transform, filter;
          position:relative; }
   .die::after{ content:""; position:absolute; inset:-1px; border-radius:14px; pointer-events:none;
                background:linear-gradient(135deg,#ffffff10,#00000000 40%); mix-blend-mode:screen; }
@@ -51,7 +51,7 @@
         <select id="numDice" aria-label="Número de dados"></select>
       </div>
       <div class="field">
-        <label for="numSides">Lados por dado (3–20)</label>
+        <label for="numSides">Lados por dado (4–20)</label>
         <select id="numSides" aria-label="Lados por dado"></select>
       </div>
       <button id="rollBtn" aria-label="Rolar os dados">🎲 Rolar</button>
@@ -68,22 +68,19 @@
     </section>
 
     <div class="footer">
-      As escolhas ficam salvas até você alterar novamente •
-      <span id="installHint" style="display:none">Dica: use “Adicionar à Tela Inicial” para instalar</span>
+      As escolhas ficam salvas até você alterar novamente.
     </div>
   </main>
 
 <script>
+/* --- PWA --- */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js'));
 }
-if (window.matchMedia && window.matchMedia('(display-mode: browser)').matches) {
-  const el = document.getElementById('installHint'); if (el) el.style.display = 'inline';
-}
 
-/* Preferências */
+/* --- Preferências --- */
 const LS_KEYS = { dice: 'dice.num', sides: 'dice.sides' };
-const DEFAULTS = { dice: 2, sides: 6 };
+const DEFAULTS = { dice: 2, sides: 6 }; // padrão segue 2d6
 function loadSetting(key, fallback) {
   const v = localStorage.getItem(key);
   const n = v !== null ? Number(v) : NaN;
@@ -91,7 +88,7 @@ function loadSetting(key, fallback) {
 }
 function saveSetting(key, value) { localStorage.setItem(key, String(value)); }
 
-/* RNG seguro */
+/* --- RNG seguro c/ rejeição --- */
 function secureRandInt(maxExclusive) {
   if (maxExclusive <= 0 || maxExclusive > 0x7fffffff) throw new RangeError('bad range');
   const cryptoObj = (self.crypto || self.msCrypto);
@@ -105,7 +102,7 @@ function secureRandInt(maxExclusive) {
 }
 function secureRandInRange(min, max) { return min + secureRandInt(max - min + 1); }
 
-/* UI */
+/* --- UI --- */
 const numDiceSel  = document.getElementById('numDice');
 const numSidesSel = document.getElementById('numSides');
 const diceArea    = document.getElementById('diceArea');
@@ -136,11 +133,12 @@ function syncDiceViews(count) {
     diceArea.removeChild(diceArea.children[i]);
   }
 }
+
 function init() {
   const savedDice  = clamp(loadSetting(LS_KEYS.dice,  DEFAULTS.dice), 1, 5);
-  const savedSides = clamp(loadSetting(LS_KEYS.sides, DEFAULTS.sides), 3, 20);
+  const savedSides = clamp(loadSetting(LS_KEYS.sides, DEFAULTS.sides), 4, 20); // <- mínimo 4 agora
   fillSelect(numDiceSel, 1, 5,   savedDice);
-  fillSelect(numSidesSel, 3, 20, savedSides);
+  fillSelect(numSidesSel, 4, 20, savedSides); // <- 4–20
   syncDiceViews(savedDice);
 
   numDiceSel.addEventListener('change', () => {
@@ -149,7 +147,7 @@ function init() {
     syncDiceViews(val);
   });
   numSidesSel.addEventListener('change', () => {
-    const val = clamp(Number(numSidesSel.value), 3, 20);
+    const val = clamp(Number(numSidesSel.value), 4, 20); // <- clamp 4–20
     saveSetting(LS_KEYS.sides, val);
   });
 
@@ -157,13 +155,17 @@ function init() {
   updatePanel([], savedDice, savedSides);
 }
 
-/* Animação 3D simples (1,5s) */
+/* --- Tumble 3D realista (1.5s) ---
+   - eixo de rotação aleatório (vetor normalizado)
+   - ângulo com inércia e desaceleração cúbica
+   - pequena trajetória em arco + “blur” leve no começo
+*/
 let rafs = [];
 function clearAllRafs(){ rafs.forEach(id=>cancelAnimationFrame(id)); rafs = []; }
 
 function roll() {
   const n = clamp(Number(numDiceSel.value), 1, 5);
-  const s = clamp(Number(numSidesSel.value), 3, 20);
+  const s = clamp(Number(numSidesSel.value), 4, 20);
   syncDiceViews(n);
 
   rollBtn.disabled = true;
@@ -172,43 +174,68 @@ function roll() {
   const diceEls = Array.from(diceArea.children);
   const start = performance.now();
   const duration = 1500;
-  const spinBase = diceEls.map(() => ({
-    rx: secureRandInRange(240, 520),
-    ry: secureRandInRange(240, 520),
-    ox: secureRandInRange(-6, 6),
-    oy: secureRandInRange(-6, 6),
-    lastNumChange: 0
-  }));
+
+  // cada dado escolhe um eixo e velocidade inicial
+  const spins = diceEls.map((_, i) => {
+    // eixo aleatório (x,y,z) normalizado
+    let ax = Math.random()*2-1, ay = Math.random()*2-1, az = Math.random()*2-1;
+    const len = Math.hypot(ax, ay, az) || 1; ax/=len; ay/=len; az/=len;
+    const w0 = 9 + Math.random()*7; // rad/s inicial (rápido no início)
+    const pathMag = 6 + Math.random()*8; // px de arco
+    return { ax, ay, az, w0, pathMag, lastNumChange: 0, i };
+  });
+
   function easeOutCubic(t){ return 1 - Math.pow(1 - t, 3); }
 
   function frame(now) {
     const elapsed = now - start;
     const t = Math.min(elapsed / duration, 1);
-    const slow = 1 - easeOutCubic(t);
+    const ease = easeOutCubic(t);
+    const w = (1 - ease); // velocidade relativa decrescendo a zero
 
     diceEls.forEach((d, i) => {
-      const base = spinBase[i];
-      const angleX = (base.rx * elapsed/1000) * slow + base.ox * Math.sin(elapsed/90 + i);
-      const angleY = (base.ry * elapsed/1000) * slow + base.oy * Math.cos(elapsed/120 + i);
-      d.style.transform = `rotateX(${angleX}deg) rotateY(${angleY}deg) translateZ(0)`;
-      const interval = 50 + 250 * t;
-      if (elapsed - base.lastNumChange >= interval) {
+      const sp = spins[i];
+
+      // ângulo acumulado (rad): integra w0 * w * dt aprox. -> usa w0 * (1 - ease)
+      const theta = sp.w0 * (elapsed/1000) * (1 - ease*0.85);
+
+      // converte eixo-ângulo em matriz simples -> aplica como rotações compostas
+      // projeção: mix de rotateX/rotateY/rotateZ aproximada
+      const rx = (sp.ax * theta) * 180/Math.PI;
+      const ry = (sp.ay * theta) * 180/Math.PI;
+      const rz = (sp.az * theta) * 180/Math.PI;
+
+      // trajetória em arco suave
+      const arc = sp.pathMag * (1 - ease) * Math.sin((elapsed/1000)*3 + i);
+      const arcY = sp.pathMag * 0.6 * (1 - ease) * Math.cos((elapsed/1000)*2.7 + i);
+
+      // leve “blur” no início
+      const blur = 0.6 * (1 - t);
+      d.style.filter = `drop-shadow(0 8px 10px rgba(0,0,0,${0.5 + 0.3*(1-t)})) blur(${blur}px)`;
+      d.style.transform = `translate(${arc}px, ${arcY}px) rotateX(${rx}deg) rotateY(${ry}deg) rotateZ(${rz}deg)`;
+
+      // flicker de face: muito rápido no começo, desacelera
+      const interval = 28 + 300 * t;
+      if (elapsed - sp.lastNumChange >= interval) {
         d.textContent = secureRandInRange(1, s);
-        base.lastNumChange = elapsed;
+        sp.lastNumChange = elapsed;
       }
     });
 
     if (elapsed < duration) {
       rafs.push(requestAnimationFrame(frame));
     } else {
+      // resultado final
       const results = [];
       let sum = 0;
       diceEls.forEach((d, i) => {
         const v = secureRandInRange(1, s);
         results.push(v); sum += v;
         d.textContent = v;
-        d.style.transition = 'transform 180ms cubic-bezier(.2,1,.2,1)';
-        d.style.transform += ' scale(1.06)';
+        // “pop” de assentamento + limpa blur
+        d.style.transition = 'transform 180ms cubic-bezier(.2,1,.2,1), filter 180ms ease';
+        d.style.transform += ' scale(1.06) translate(0,0)'; // volta à base
+        d.style.filter = 'drop-shadow(0 8px 12px rgba(0,0,0,.55)) blur(0px)';
         setTimeout(()=>{ d.style.transform = d.style.transform.replace(' scale(1.06)',''); d.style.transition=''; }, 200);
       });
       updatePanel(results, n, s, sum);
@@ -218,7 +245,7 @@ function roll() {
   rafs.push(requestAnimationFrame(frame));
 }
 
-/* Painel */
+/* --- Painel de resultados --- */
 function updatePanel(results, n, s, sum){
   chips.innerHTML = '';
   if (results.length) {
